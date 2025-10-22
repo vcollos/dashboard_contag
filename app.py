@@ -152,10 +152,8 @@ def load_filter_options() -> dict[str, list]:
         SELECT
           ARRAY_AGG(DISTINCT ano ORDER BY ano DESC) AS anos,
           ARRAY_AGG(DISTINCT trimestre ORDER BY trimestre) AS trimestres,
-          ARRAY_AGG(DISTINCT modalidade ORDER BY modalidade)
-            FILTER (WHERE modalidade IS NOT NULL) AS modalidades,
-          ARRAY_AGG(DISTINCT porte ORDER BY porte)
-            FILTER (WHERE porte IS NOT NULL) AS portes
+          ARRAY_AGG(DISTINCT modalidade IGNORE NULLS ORDER BY modalidade) AS modalidades,
+          ARRAY_AGG(DISTINCT porte IGNORE NULLS ORDER BY porte) AS portes
         FROM base
     """
     filters_df = run_query(client, meta_query)
@@ -270,8 +268,8 @@ def load_indicators(filters: dict, ignore_period_filters: bool = False) -> pd.Da
             ) AS razao_social,
             COALESCE(NULLIF(m.modalidade, ''), NULLIF(UPPER(op.MODALIDADE), '')) AS modalidade,
             NULLIF(m.porte, '') AS porte,
-            COALESCE(m.total_beneficiarios, i.beneficiarios_trimestre) AS total_beneficiarios,
-            i.flag_uniodonto,
+            m.total_beneficiarios AS total_beneficiarios,
+            CAST(NULL AS BOOL) AS flag_uniodonto,
             i.sinistralidade,
             i.pct_despesas_administrativas,
             i.pct_despesas_comerciais,
@@ -372,8 +370,8 @@ def load_financial_overview(filters: dict) -> pd.DataFrame:
             ) AS razao_social,
             COALESCE(NULLIF(m.modalidade, ''), NULLIF(UPPER(op.MODALIDADE), '')) AS modalidade,
             NULLIF(m.porte, '') AS porte,
-            COALESCE(m.total_beneficiarios, i.beneficiarios_trimestre) AS total_beneficiarios,
-            i.flag_uniodonto
+            m.total_beneficiarios AS total_beneficiarios,
+            CAST(NULL AS BOOL) AS flag_uniodonto
           FROM {indicator_ref} i
           LEFT JOIN {meta_ref} m
             ON i.reg_ans = m.reg_ans
