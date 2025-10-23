@@ -1,35 +1,22 @@
 """
 Streamlit dashboard for ANS RN 518 odontological indicators.
 
-The app reads the consolidated view `datalake_ans.vw_indicadores_odonto`
-on BigQuery and allows filtering by operator, modality, porte, year and quarter.
+The app reads the consolidated dataset `dados/csv_completao_2trimestre25.parquet`
+and allows filtering by operadora, modalidade, porte, ano e trimestre.
 """
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
 from typing import Iterable
 
+import altair as alt
 import pandas as pd
 import streamlit as st
-import altair as alt
-from google.cloud import bigquery
 
-PROJECT_ID_ENV_VAR = "GCP_PROJECT_ID"
-DEFAULT_PROJECT = "bigdata-467917"
-DATASET = "datalake_ans"
-INDICATOR_VIEW = "rn518_gold.vw_rn518_12_indicadores"
-COMPONENT_VIEW = "rn518_gold.vw_rn518_resultados_contabeis_trimestre"
-DEMONSTRATION_VIEW = "rn518_gold.vw_rn518_resultados_contabeis_trimestre"
-META_VIEW = "datalake_ans.vw_indicadores_odonto"
-OPERADORAS_TABLE = "datalake_ans.operadoras"
-UNIODONTO_CSV = Path(__file__).resolve().parent / "documentos" / "Operadoras.csv"
-SERVICE_ACCOUNT_RELATIVE_PATH = (
-    "serviceaccount/bigdata-467917-252d585a99b8.json"
-)
+INDICATORS_DATA_PATH = Path(__file__).resolve().parent / "dados" / "csv_completao_2trimestre25.parquet"
 
 
 @dataclass(frozen=True)
@@ -50,34 +37,20 @@ INDICATORS: tuple[Indicator, ...] = (
     Indicator("Sinistralidade", "sinistralidade", "pct"),
     Indicator("Despesas Administrativas", "pct_despesas_administrativas", "pct"),
     Indicator("Despesas Comerciais", "pct_despesas_comerciais", "pct"),
+    Indicator("Despesas com Tributos", "pct_despesas_tributarias", "pct"),
     Indicator("Despesas Operacionais", "pct_despesas_operacionais", "pct"),
     Indicator("Índice Resultado Financeiro", "indice_resultado_financeiro", "pct"),
-    Indicator("Liquidez Corrente", "liquidez_corrente", "ratio"),
-    Indicator("CT / CP", "ct_cp", "ratio"),
-    Indicator("Prazo Médio (Contraprestações)", "pm_contraprestacoes", "days"),
-    Indicator("Prazo Médio (Eventos)", "pm_eventos", "days"),
     Indicator("Margem Financeira Líquida", "margem_financeira_liquida", "pct"),
-    Indicator("Margem Operacional", "margem_operacional", "pct"),
-    Indicator("Margem Lucro Líquida", "margem_lucro_liquida", "pct"),
+    Indicator("Liquidez Corrente", "liquidez_corrente", "ratio"),
+    Indicator("Liquidez Seca", "liquidez_seca", "ratio"),
+    Indicator("Endividamento", "endividamento", "ratio"),
+    Indicator("Imobilização do PL", "imobilizacao_pl", "ratio"),
+    Indicator("Retorno sobre PL", "retorno_patrimonio_liquido", "pct"),
+    Indicator("Cobertura Provisões Técnicas", "cobertura_provisoes", "ratio"),
+    Indicator("Margem de Solvência", "margem_solvencia", "ratio"),
 )
 
-COMPONENTS: tuple[Component, ...] = (
-    Component("Contraprestações", "vr_contraprestacoes"),
-    Component("Recuperação CCT (ABS)", "vr_cct_abs"),
-    Component("Eventos Indenizáveis Líquidos", "vr_eventos_liquidos"),
-    Component("Despesa Comercial", "vr_desp_comerciais"),
-    Component("Despesa Administrativa", "vr_desp_administrativas"),
-    Component("Outras Despesas Operacionais", "vr_outras_desp_oper"),
-    Component("Outras Receitas Operacionais", "vr_outras_receitas_operacionais"),
-    Component("Receitas Financeiras", "vr_receitas_fin"),
-    Component("Despesas Financeiras", "vr_despesas_fin"),
-    Component("Ativo Circulante", "vr_ativo_circulante"),
-    Component("Passivo Circulante", "vr_passivo_circulante"),
-    Component("Passivo Não Circulante", "vr_passivo_nao_circulante"),
-    Component("Patrimônio Líquido", "vr_patrimonio_liquido"),
-    Component("Créditos Operações Saúde", "vr_creditos_operacoes_saude"),
-    Component("Eventos a Liquidar", "vr_eventos_a_liquidar"),
-)
+COMPONENTS: tuple[Component, ...] = tuple()
 
 COMPONENT_LABELS = {component.column: component.name for component in COMPONENTS}
 
@@ -88,323 +61,132 @@ def chunked(iterable: Iterable[Indicator], size: int) -> Iterable[tuple[Indicato
         yield chunk
 
 
-def ensure_credentials() -> Path | None:
-    """Guarantee that Google credentials are configured before creating client."""
-    if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
-        return Path(os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
-    credentials_path = Path(__file__).resolve().parent / SERVICE_ACCOUNT_RELATIVE_PATH
-    if credentials_path.exists():
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(credentials_path)
-        return credentials_path
-    return None
-
-
-@st.cache_resource(show_spinner=False)
-def get_bigquery_client() -> bigquery.Client:
-    credentials_path = ensure_credentials()
-    if credentials_path is None:
-        raise FileNotFoundError(
-            "Credencial Google não encontrada. Ajuste a variável "
-            f"GOOGLE_APPLICATION_CREDENTIALS ou coloque o arquivo em {SERVICE_ACCOUNT_RELATIVE_PATH}."
-        )
-    project_id = os.getenv(PROJECT_ID_ENV_VAR, DEFAULT_PROJECT)
-    return bigquery.Client(project=project_id)
-
-
-def run_query(client: bigquery.Client, query: str, parameters: list | None = None) -> pd.DataFrame:
-    job_config = bigquery.QueryJobConfig(query_parameters=parameters or [])
-    rows = client.query(query, job_config=job_config).result()
-    records = [dict(row.items()) for row in rows]
-    return pd.DataFrame(records)
-
-
 @st.cache_data(show_spinner=False)
-def load_uniodonto_catalog() -> pd.DataFrame:
-    if not UNIODONTO_CSV.exists():
-        return pd.DataFrame()
-    df = pd.read_csv(UNIODONTO_CSV, dtype=str)
-    df["REG_ANS"] = df["REG_ANS"].str.strip()
-    df["CNPJ"] = df["CNPJ"].str.strip()
+def load_dataset() -> pd.DataFrame:
+    if not INDICATORS_DATA_PATH.exists():
+        raise FileNotFoundError(
+            f"Arquivo de indicadores não encontrado em {INDICATORS_DATA_PATH}. "
+            "Confirme que o arquivo Parquet definitivo está disponível."
+        )
+    df = pd.read_parquet(INDICATORS_DATA_PATH)
+    df = df.copy()
+    df.columns = [col.strip() for col in df.columns]
+    df["reg_ans"] = df["reg_ans"].astype(str).str.strip()
+    df["ano"] = df["ano"].astype(int)
+    df["trimestre"] = df["trimestre"].astype(int)
+    if "nome_operadora" not in df.columns:
+        df["nome_operadora"] = ""
+    else:
+        df["nome_operadora"] = df["nome_operadora"].fillna("").astype(str).str.strip()
+    df["nome_fantasia"] = df["nome_operadora"]
+    df["razao_social"] = df["nome_operadora"]
+    if "modalidade" not in df.columns:
+        df["modalidade"] = ""
+    else:
+        df["modalidade"] = df["modalidade"].fillna("").astype(str).str.strip()
+    if "porte" not in df.columns:
+        df["porte"] = ""
+    else:
+        df["porte"] = df["porte"].fillna("").astype(str).str.strip()
+    if "qt_beneficiarios_periodo" in df.columns:
+        df["total_beneficiarios"] = df["qt_beneficiarios_periodo"].fillna(0)
+    else:
+        df["total_beneficiarios"] = 0
+    if "uniodonto" in df.columns:
+        df["uniodonto"] = df["uniodonto"].fillna("").astype(str).str.strip()
+    else:
+        df["uniodonto"] = ""
+    df["is_uniodonto"] = df["uniodonto"].str.upper() == "SIM"
+    for indicator in INDICATORS:
+        if indicator.column not in df.columns:
+            df[indicator.column] = float("nan")
     return df
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(show_spinner=False)
 def load_filter_options() -> dict[str, list]:
-    client = get_bigquery_client()
-    indicator_ref = f"`{client.project}.{INDICATOR_VIEW}`"
-    meta_ref = f"`{client.project}.{META_VIEW}`"
-    operadoras_ref = f"`{client.project}.{OPERADORAS_TABLE}`"
-    meta_query = f"""
-        WITH base AS (
-          SELECT
-            i.ano,
-            i.trimestre,
-            COALESCE(NULLIF(m.modalidade, ''), NULLIF(UPPER(op.modalidade), '')) AS modalidade,
-            NULLIF(m.porte, '') AS porte
-          FROM {indicator_ref} i
-          LEFT JOIN {meta_ref} m
-            ON i.reg_ans = m.reg_ans
-           AND i.ano = m.ano
-           AND i.trimestre = m.trimestre
-          LEFT JOIN {operadoras_ref} op
-            ON i.reg_ans = SAFE_CAST(op.REG_ANS AS STRING)
-        )
-        SELECT
-          ARRAY_AGG(DISTINCT ano ORDER BY ano DESC) AS anos,
-          ARRAY_AGG(DISTINCT trimestre ORDER BY trimestre) AS trimestres,
-          ARRAY_AGG(DISTINCT modalidade IGNORE NULLS ORDER BY modalidade) AS modalidades,
-          ARRAY_AGG(DISTINCT porte IGNORE NULLS ORDER BY porte) AS portes
-        FROM base
-    """
-    filters_df = run_query(client, meta_query)
-    if filters_df.empty:
-        return {"anos": [], "trimestres": [], "modalidades": [], "portes": [], "operadoras": []}
-    options = filters_df.iloc[0].to_dict()
-    for key in ("anos", "trimestres", "modalidades", "portes"):
-        if options.get(key) is None:
-            options[key] = []
-
-    operadoras_query = f"""
-        SELECT DISTINCT
-          i.reg_ans,
-          COALESCE(
-            NULLIF(m.nome_fantasia, ''),
-            NULLIF(m.razao_social, ''),
-            NULLIF(op.NOME_FANTASIA, ''),
-            NULLIF(op.RAZAO_SOCIAL, ''),
-            i.reg_ans
-          ) AS nome,
-          COALESCE(NULLIF(m.modalidade, ''), NULLIF(UPPER(op.MODALIDADE), '')) AS modalidade,
-          NULLIF(m.porte, '') AS porte
-        FROM {indicator_ref} i
-        LEFT JOIN {meta_ref} m
-          ON i.reg_ans = m.reg_ans
-         AND i.ano = m.ano
-         AND i.trimestre = m.trimestre
-        LEFT JOIN {operadoras_ref} op
-          ON i.reg_ans = SAFE_CAST(op.REG_ANS AS STRING)
-        ORDER BY nome
-    """
-    operadoras_df = run_query(client, operadoras_query)
-    uniodonto_df = load_uniodonto_catalog()
-    uniodonto_reg_ans = set()
-    if not uniodonto_df.empty:
-        uniodonto_reg_ans = set(uniodonto_df["REG_ANS"].dropna().astype(str))
-        operadoras_df["is_uniodonto"] = operadoras_df["reg_ans"].isin(uniodonto_reg_ans)
-    else:
-        operadoras_df["is_uniodonto"] = False
+    df = load_dataset()
+    anos = sorted(df["ano"].dropna().unique().tolist(), reverse=True)
+    trimestres = sorted(df["trimestre"].dropna().unique().tolist())
+    modalidades = sorted(
+        value for value in df["modalidade"].dropna().unique().tolist() if isinstance(value, str) and value
+    )
+    portes = sorted(
+        value for value in df["porte"].dropna().unique().tolist() if isinstance(value, str) and value
+    )
     operadoras_df = (
-        operadoras_df.sort_values(["nome", "reg_ans"], na_position="last")
+        df[["reg_ans", "nome_fantasia", "modalidade", "porte", "is_uniodonto"]]
         .drop_duplicates(subset=["reg_ans"], keep="first")
+        .sort_values(["nome_fantasia", "reg_ans"], na_position="last")
+        .rename(columns={"nome_fantasia": "nome"})
         .reset_index(drop=True)
     )
-    options["operadoras"] = operadoras_df
-    options["uniodonto_reg_ans"] = sorted(uniodonto_reg_ans)
-    return options
+    operadoras_df["nome"] = operadoras_df["nome"].fillna("").astype(str).str.strip()
+    operadoras_df.loc[operadoras_df["nome"] == "", "nome"] = operadoras_df.loc[
+        operadoras_df["nome"] == "", "reg_ans"
+    ]
+    uniodonto_reg_ans = sorted(operadoras_df.loc[operadoras_df["is_uniodonto"], "reg_ans"].tolist())
+    return {
+        "anos": anos,
+        "trimestres": trimestres,
+        "modalidades": modalidades,
+        "portes": portes,
+        "operadoras": operadoras_df,
+        "uniodonto_reg_ans": uniodonto_reg_ans,
+    }
 
 
-def build_filter_conditions(
-    filters: dict,
-    alias: str = "b",
-    ignore_period_filters: bool = False,
-) -> tuple[str, list[bigquery.QueryParameter]]:
-    clauses = ["1 = 1"]
-    params: list[bigquery.QueryParameter] = []
+def apply_filters(df: pd.DataFrame, filters: dict, ignore_period_filters: bool = False) -> pd.DataFrame:
+    if df.empty or not filters:
+        return df.copy()
 
-    if not ignore_period_filters and filters.get("anos"):
-        clauses.append(f"{alias}.ano IN UNNEST(@anos)")
-        params.append(bigquery.ArrayQueryParameter("anos", "INT64", filters["anos"]))
-    if not ignore_period_filters and filters.get("trimestres"):
-        clauses.append(f"{alias}.trimestre IN UNNEST(@trimestres)")
-        params.append(bigquery.ArrayQueryParameter("trimestres", "INT64", filters["trimestres"]))
-    if filters.get("modalidades"):
-        clauses.append(f"{alias}.modalidade IN UNNEST(@modalidades)")
-        params.append(bigquery.ArrayQueryParameter("modalidades", "STRING", filters["modalidades"]))
-    if filters.get("portes"):
-        clauses.append(f"{alias}.porte IN UNNEST(@portes)")
-        params.append(bigquery.ArrayQueryParameter("portes", "STRING", filters["portes"]))
-    if filters.get("operadoras"):
-        clauses.append(f"{alias}.reg_ans IN UNNEST(@operadoras)")
-        params.append(bigquery.ArrayQueryParameter("operadoras", "STRING", filters["operadoras"]))
+    mask = pd.Series(True, index=df.index)
+
+    if not ignore_period_filters:
+        anos = filters.get("anos") or []
+        if anos:
+            mask &= df["ano"].isin(anos)
+        trimestres = filters.get("trimestres") or []
+        if trimestres:
+            mask &= df["trimestre"].isin(trimestres)
+
+    modalidades = filters.get("modalidades") or []
+    if modalidades:
+        mask &= df["modalidade"].isin(modalidades)
+
+    portes = filters.get("portes") or []
+    if portes:
+        mask &= df["porte"].isin(portes)
+
+    operadoras = filters.get("operadoras") or []
+    if operadoras:
+        mask &= df["reg_ans"].isin(operadoras)
 
     if filters.get("somente_uniodonto"):
-        uniodonto_reg_ans = filters.get("uniodonto_reg_ans") or []
-        if uniodonto_reg_ans:
-            clauses.append(f"{alias}.reg_ans IN UNNEST(@uniodonto)")
-            params.append(bigquery.ArrayQueryParameter("uniodonto", "STRING", uniodonto_reg_ans))
+        mask &= df["is_uniodonto"]
 
-    return " AND ".join(clauses), params
+    return df.loc[mask].copy()
 
 
 @st.cache_data(ttl=900, show_spinner=False)
 def load_indicators(filters: dict, ignore_period_filters: bool = False) -> pd.DataFrame:
-    client = get_bigquery_client()
-    indicator_ref = f"`{client.project}.{INDICATOR_VIEW}`"
-    meta_ref = f"`{client.project}.{META_VIEW}`"
-    operadoras_ref = f"`{client.project}.{OPERADORAS_TABLE}`"
-    component_ref = f"`{client.project}.{COMPONENT_VIEW}`"
-    filters = dict(filters)
-    where_clause, parameters = build_filter_conditions(
-        filters,
-        alias="b",
-        ignore_period_filters=ignore_period_filters,
+    df = load_dataset()
+    filtered = apply_filters(df, filters, ignore_period_filters=ignore_period_filters)
+    if filtered.empty:
+        return filtered
+    return (
+        filtered.sort_values(["ano", "trimestre", "reg_ans"], ascending=[False, False, True])
+        .reset_index(drop=True)
     )
-    query = f"""
-        WITH base AS (
-          SELECT
-            i.reg_ans,
-            i.ano,
-            i.trimestre,
-            COALESCE(
-              NULLIF(m.nome_fantasia, ''),
-              NULLIF(m.razao_social, ''),
-              NULLIF(op.NOME_FANTASIA, ''),
-              NULLIF(op.RAZAO_SOCIAL, ''),
-              i.reg_ans
-            ) AS nome_fantasia,
-            COALESCE(
-              NULLIF(m.razao_social, ''),
-              NULLIF(op.RAZAO_SOCIAL, '')
-            ) AS razao_social,
-            COALESCE(NULLIF(m.modalidade, ''), NULLIF(UPPER(op.MODALIDADE), '')) AS modalidade,
-            NULLIF(m.porte, '') AS porte,
-            m.total_beneficiarios AS total_beneficiarios,
-            CAST(NULL AS BOOL) AS flag_uniodonto,
-            i.sinistralidade,
-            i.pct_despesas_administrativas,
-            i.pct_despesas_comerciais,
-            i.pct_despesas_operacionais,
-            i.indice_resultado_financeiro,
-            i.liquidez_corrente,
-            i.ct_cp,
-            i.pm_contraprestacoes,
-            i.pm_eventos,
-            i.margem_financeira_liquida,
-            i.margem_operacional,
-            i.margem_lucro_liquida
-          FROM {indicator_ref} i
-          LEFT JOIN {meta_ref} m
-            ON i.reg_ans = m.reg_ans
-           AND i.ano = m.ano
-           AND i.trimestre = m.trimestre
-          LEFT JOIN {operadoras_ref} op
-            ON i.reg_ans = SAFE_CAST(op.REG_ANS AS STRING)
-        ),
-        componentes AS (
-          SELECT
-            reg_ans,
-            ano,
-            trimestre,
-            contraprestacoes AS vr_contraprestacoes,
-            cct_abs AS vr_cct_abs,
-            eventos_liquidos AS vr_eventos_liquidos,
-            desp_comerciais AS vr_desp_comerciais,
-            desp_administrativas AS vr_desp_administrativas,
-            outras_desp_oper AS vr_outras_desp_oper,
-            vr_outras_receitas_operacionais,
-            receitas_fin AS vr_receitas_fin,
-            despesas_fin AS vr_despesas_fin,
-            ativo_circulante AS vr_ativo_circulante,
-            passivo_circulante AS vr_passivo_circulante,
-            passivo_nao_circulante AS vr_passivo_nao_circulante,
-            patrimonio_liquido AS vr_patrimonio_liquido,
-            vr_creditos_operacoes_saude,
-            vr_eventos_a_liquidar,
-            beneficiarios_trimestre
-          FROM {component_ref}
-        )
-        SELECT
-          b.*,
-          c.vr_contraprestacoes,
-          c.vr_cct_abs,
-          c.vr_eventos_liquidos,
-          c.vr_desp_comerciais,
-          c.vr_desp_administrativas,
-          c.vr_outras_desp_oper,
-          c.vr_outras_receitas_operacionais,
-          c.vr_receitas_fin,
-          c.vr_despesas_fin,
-          c.vr_ativo_circulante,
-          c.vr_passivo_circulante,
-          c.vr_passivo_nao_circulante,
-          c.vr_patrimonio_liquido,
-          c.vr_creditos_operacoes_saude,
-          c.vr_eventos_a_liquidar,
-          COALESCE(b.total_beneficiarios, c.beneficiarios_trimestre) AS total_beneficiarios
-        FROM base b
-        LEFT JOIN componentes c
-          ON b.reg_ans = c.reg_ans
-         AND b.ano = c.ano
-         AND b.trimestre = c.trimestre
-        WHERE {where_clause}
-        ORDER BY b.ano DESC, b.trimestre DESC, b.reg_ans
-    """
-    return run_query(client, query, parameters)
 
 
 @st.cache_data(ttl=900, show_spinner=False)
 def load_financial_overview(filters: dict) -> pd.DataFrame:
-    client = get_bigquery_client()
-    indicator_ref = f"`{client.project}.{INDICATOR_VIEW}`"
-    meta_ref = f"`{client.project}.{META_VIEW}`"
-    operadoras_ref = f"`{client.project}.{OPERADORAS_TABLE}`"
-    demo_ref = f"`{client.project}.{DEMONSTRATION_VIEW}`"
-    filters = dict(filters)
-    where_clause, parameters = build_filter_conditions(filters, alias="b", ignore_period_filters=False)
-    query = f"""
-        WITH base AS (
-          SELECT
-            i.reg_ans,
-            i.ano,
-            i.trimestre,
-            COALESCE(
-              NULLIF(m.nome_fantasia, ''),
-              NULLIF(m.razao_social, ''),
-              NULLIF(op.NOME_FANTASIA, ''),
-              NULLIF(op.RAZAO_SOCIAL, ''),
-              i.reg_ans
-            ) AS nome_fantasia,
-            COALESCE(
-              NULLIF(m.razao_social, ''),
-              NULLIF(op.RAZAO_SOCIAL, '')
-            ) AS razao_social,
-            COALESCE(NULLIF(m.modalidade, ''), NULLIF(UPPER(op.MODALIDADE), '')) AS modalidade,
-            NULLIF(m.porte, '') AS porte,
-            m.total_beneficiarios AS total_beneficiarios,
-            CAST(NULL AS BOOL) AS flag_uniodonto
-          FROM {indicator_ref} i
-          LEFT JOIN {meta_ref} m
-            ON i.reg_ans = m.reg_ans
-           AND i.ano = m.ano
-           AND i.trimestre = m.trimestre
-          LEFT JOIN {operadoras_ref} op
-            ON i.reg_ans = SAFE_CAST(op.REG_ANS AS STRING)
-        )
-        SELECT
-          b.*,
-          d.vr_contraprestacoes,
-          d.vr_eventos_liquidos,
-          d.vr_desp_comerciais,
-          d.vr_desp_administrativas,
-          d.vr_outras_desp_oper,
-          d.vr_outras_receitas_operacionais,
-          d.vr_receitas_fin,
-          d.vr_despesas_fin,
-          d.vr_ativo_circulante,
-          d.vr_passivo_circulante,
-          d.vr_passivo_nao_circulante,
-          d.vr_patrimonio_liquido,
-          d.vr_creditos_operacoes_saude,
-          d.vr_eventos_a_liquidar
-        FROM base b
-        LEFT JOIN {demo_ref} d
-          ON b.reg_ans = d.reg_ans
-         AND b.ano = d.ano
-         AND b.trimestre = d.trimestre
-        WHERE {where_clause}
-        ORDER BY b.ano DESC, b.trimestre DESC, b.reg_ans
-    """
-    return run_query(client, query, parameters)
+    df = load_dataset()
+    filtered = apply_filters(df, filters, ignore_period_filters=False)
+    if filtered.empty:
+        return filtered
+    return filtered.sort_values(["ano", "trimestre", "reg_ans"], ascending=[False, False, True]).reset_index(drop=True)
 
 
 def format_metric(value: float | None, kind: str) -> str:
@@ -421,6 +203,16 @@ def format_currency(value: float | None) -> str:
     if value is None or pd.isna(value):
         return "—"
     return f"R$ {value:,.0f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def format_difference(value: float | None, kind: str) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    if kind == "pct":
+        return f"{value * 100:+.2f}%"
+    if kind == "days":
+        return f"{value:+.1f} dias"
+    return f"{value:+.2f}"
 
 
 def classify_indicator_value(column: str, value: float | None) -> str:
@@ -444,6 +236,12 @@ def classify_indicator_value(column: str, value: float | None) -> str:
         if value <= 0.12:
             return "Atenção"
         return "Elevado"
+    if column == "pct_despesas_tributarias":
+        if value <= 0.03:
+            return "Controlado"
+        if value <= 0.05:
+            return "Atenção"
+        return "Pressão"
     if column == "pct_despesas_operacionais":
         if value <= 0.90:
             return "Controlado"
@@ -464,24 +262,52 @@ def classify_indicator_value(column: str, value: float | None) -> str:
         if value >= 0.8:
             return "Alerta"
         return "Risco"
-    if column == "ct_cp":
-        if value <= 1.5:
+    if column == "liquidez_seca":
+        if value >= 1.2:
+            return "Sólida"
+        if value >= 1.0:
+            return "Confortável"
+        if value >= 0.8:
+            return "Alerta"
+        return "Risco"
+    if column == "endividamento":
+        if value <= 1.0:
             return "Baixo"
-        if value <= 3.0:
+        if value <= 2.0:
             return "Moderado"
-        return "Alavancado"
-    if column in {"margem_financeira_liquida", "margem_operacional", "margem_lucro_liquida"}:
+        return "Elevado"
+    if column == "imobilizacao_pl":
+        if value <= 0.6:
+            return "Adequado"
+        if value <= 0.8:
+            return "Atenção"
+        return "Alto"
+    if column == "retorno_patrimonio_liquido":
+        if value >= 0.08:
+            return "Excelente"
+        if value >= 0.04:
+            return "Adequado"
+        if value >= 0:
+            return "Atenção"
+        return "Negativo"
+    if column in {"margem_financeira_liquida"}:
         if value >= 0.05:
             return "Saudável"
         if value >= 0:
             return "Equilíbrio"
         return "Prejuízo"
-    if column in {"pm_contraprestacoes", "pm_eventos"}:
-        if value <= 60:
-            return "Curto"
-        if value <= 90:
-            return "Médio"
-        return "Longo"
+    if column == "cobertura_provisoes":
+        if value >= 1.0:
+            return "Coberto"
+        if value >= 0.9:
+            return "Atenção"
+        return "Descoberto"
+    if column == "margem_solvencia":
+        if value >= 1.0:
+            return "Atende"
+        if value >= 0.8:
+            return "Atenção"
+        return "Insuficiente"
     return ""
 
 
@@ -507,26 +333,10 @@ def render_filters(options: dict) -> dict:
         modalidades = sorted({m for m in operadoras_df["modalidade"].dropna().unique() if m})
         portes = sorted({p for p in operadoras_df["porte"].dropna().unique() if p})
 
-    selected_years = st.sidebar.multiselect(
-        "Ano",
-        options=anos,
-        default=anos[:4],
-    )
-    selected_quarters = st.sidebar.multiselect(
-        "Trimestre",
-        options=trimestres,
-        default=trimestres,
-    )
-    selected_modalidades = st.sidebar.multiselect(
-        "Modalidade",
-        options=modalidades,
-        default=modalidades,
-    )
-    selected_portes = st.sidebar.multiselect(
-        "Porte",
-        options=portes,
-        default=portes,
-    )
+    selected_years = st.sidebar.multiselect("Ano", options=anos, default=[])
+    selected_quarters = st.sidebar.multiselect("Trimestre", options=trimestres, default=[])
+    selected_modalidades = st.sidebar.multiselect("Modalidade", options=modalidades, default=[])
+    selected_portes = st.sidebar.multiselect("Porte", options=portes, default=[])
 
     operadora_options = []
     format_lookup: dict[str, str] = {}
@@ -719,6 +529,10 @@ def show_ranking_table(df: pd.DataFrame) -> None:
         st.info("Não foi possível montar o ranking para o período selecionado.")
         return
     latest_with_period = append_period_columns(latest_df)
+    required_cols = {"sinistralidade", "retorno_patrimonio_liquido", "liquidez_corrente"}
+    if not required_cols.issubset(latest_with_period.columns):
+        st.info("Indicadores necessários para o ranking não estão disponíveis.")
+        return
     ranking = latest_with_period[
         [
             "reg_ans",
@@ -727,20 +541,20 @@ def show_ranking_table(df: pd.DataFrame) -> None:
             "modalidade",
             "porte",
             "sinistralidade",
-            "margem_lucro_liquida",
+            "retorno_patrimonio_liquido",
             "liquidez_corrente",
         ]
     ].copy()
-    ranking["ranking_mll"] = ranking["margem_lucro_liquida"].rank(ascending=False, method="min").astype(int)
-    ranking["ranking_sinistralidade"] = ranking["sinistralidade"].rank(ascending=True, method="min").astype(int)
-    ranking.sort_values(["ranking_mll", "ranking_sinistralidade"], inplace=True)
+    ranking["ranking_roe"] = ranking["retorno_patrimonio_liquido"].rank(ascending=False, method="min").astype("Int64")
+    ranking["ranking_sinistralidade"] = ranking["sinistralidade"].rank(ascending=True, method="min").astype("Int64")
+    ranking.sort_values(["ranking_roe", "ranking_sinistralidade"], inplace=True)
     ranking.rename(columns={"periodo_label": "Período"}, inplace=True)
     ranking["Sinistralidade"] = ranking["sinistralidade"].apply(lambda x: format_metric(x, "pct"))
-    ranking["MLL"] = ranking["margem_lucro_liquida"].apply(lambda x: format_metric(x, "pct"))
+    ranking["ROE"] = ranking["retorno_patrimonio_liquido"].apply(lambda x: format_metric(x, "pct"))
     ranking["Liquidez Corrente"] = ranking["liquidez_corrente"].apply(lambda x: format_metric(x, "ratio"))
     ranking.rename(
         columns={
-            "ranking_mll": "Ranking MLL",
+            "ranking_roe": "Ranking ROE",
             "reg_ans": "Registro ANS",
             "nome_fantasia": "Operadora",
             "modalidade": "Modalidade",
@@ -751,14 +565,14 @@ def show_ranking_table(df: pd.DataFrame) -> None:
     )
     display_cols = [
         "Período",
-        "Ranking MLL",
+        "Ranking ROE",
         "Registro ANS",
         "Operadora",
         "Modalidade",
         "Porte",
         "Sinistralidade",
         "Ranking Sinistralidade",
-        "MLL",
+        "ROE",
         "Liquidez Corrente",
     ]
     st.subheader(
@@ -782,7 +596,6 @@ def show_detail_table(df: pd.DataFrame) -> None:
         "modalidade",
         "porte",
         "total_beneficiarios",
-        "flag_uniodonto",
     ] + [indicator.column for indicator in INDICATORS]
     renaming = {
         "periodo_label": "Período",
@@ -791,39 +604,39 @@ def show_detail_table(df: pd.DataFrame) -> None:
         "modalidade": "Modalidade",
         "porte": "Porte",
         "total_beneficiarios": "Beneficiários",
-        "flag_uniodonto": "Uniodonto",
     }
+    indicator_renaming = {indicator.column: indicator.name for indicator in INDICATORS}
 
     with tab_indicadores:
-        indicator_data = df[indicator_cols].rename(columns=renaming)
+        indicator_data_raw = df[indicator_cols].copy()
+        indicator_display = indicator_data_raw.rename(columns=renaming | indicator_renaming)
+        for indicator in INDICATORS:
+            col_name = indicator_renaming[indicator.column]
+            indicator_display[col_name] = indicator_display[col_name].apply(lambda x: format_metric(x, indicator.kind))
         st.dataframe(
-            indicator_data,
+            indicator_display,
             use_container_width=True,
             hide_index=True,
         )
         st.download_button(
             "Download Indicadores (CSV)",
-            indicator_data.to_csv(index=False).encode("utf-8"),
+            indicator_data_raw.rename(columns=renaming | indicator_renaming).to_csv(index=False).encode("utf-8"),
             file_name="indicadores_rn518_odonto.csv",
             mime="text/csv",
         )
 
-    component_columns = [component.column for component in COMPONENTS if component.column in df.columns]
-    if component_columns:
+    with tab_componentes:
+        component_columns = [component.column for component in COMPONENTS if component.column in df.columns]
+        if not component_columns:
+            st.info("Componentes contábeis não foram incluídos nesta base.")
+            return
         component_renaming = {
             component.column: component.name for component in COMPONENTS if component.column in component_columns
         }
-        base_cols = ["periodo_label", "reg_ans", "nome_fantasia", "modalidade", "porte", "flag_uniodonto"]
+        base_cols = ["periodo_label", "reg_ans", "nome_fantasia", "modalidade", "porte"]
         available_base = [col for col in base_cols if col in df.columns]
         renamed_cols = component_renaming | renaming
         component_data = df[available_base + component_columns].rename(columns=renamed_cols)
-    else:
-        component_data = pd.DataFrame()
-
-    with tab_componentes:
-        if component_data.empty:
-            st.info("Componentes indisponíveis para os filtros aplicados.")
-            return
         currency_columns = {
             component_renaming[col]: st.column_config.NumberColumn(
                 label=component_renaming[col],
@@ -846,6 +659,100 @@ def show_detail_table(df: pd.DataFrame) -> None:
         )
 
 
+def show_segment_comparison(
+    filtered_df: pd.DataFrame,
+    segment_df: pd.DataFrame,
+    selected_filters: dict,
+) -> None:
+    st.subheader("Comparativo Operadora x Segmento")
+    if filtered_df.empty:
+        st.info("Sem dados para as operadoras selecionadas.")
+        return
+    selected_operadoras = selected_filters.get("operadoras") or []
+    if not selected_operadoras:
+        st.info("Selecione uma operadora na barra lateral para visualizar o comparativo com modalidade e porte.")
+        return
+    available_ops = (
+        filtered_df[["reg_ans", "operadora_label"]]
+        .drop_duplicates()
+        .set_index("reg_ans")["operadora_label"]
+        .to_dict()
+    )
+    default_operadora = next((reg for reg in selected_operadoras if reg in available_ops), None)
+    if default_operadora is None:
+        st.info("Operadora selecionada não possui dados nos filtros atuais.")
+        return
+    operadora_choices = [reg for reg in selected_operadoras if reg in available_ops]
+    if len(operadora_choices) > 1:
+        selected_id = st.selectbox(
+            "Operadora para comparação",
+            options=operadora_choices,
+            format_func=lambda reg: available_ops.get(reg, reg),
+            index=operadora_choices.index(default_operadora),
+        )
+    else:
+        selected_id = default_operadora
+
+    op_df = filtered_df[filtered_df["reg_ans"] == selected_id]
+    if op_df.empty:
+        st.info("Dados da operadora selecionada não encontrados nos filtros atuais.")
+        return
+
+    modality_value = next((val for val in op_df["modalidade"].dropna().astype(str) if val.strip()), "")
+    porte_value = next((val for val in op_df["porte"].dropna().astype(str) if val.strip()), "")
+
+    indicator_columns = [indicator.column for indicator in INDICATORS]
+    operadora_avg = op_df[indicator_columns].mean(numeric_only=True)
+
+    modalidade_df = (
+        segment_df[segment_df["modalidade"] == modality_value] if modality_value else pd.DataFrame()
+    )
+    porte_df = segment_df[segment_df["porte"] == porte_value] if porte_value else pd.DataFrame()
+
+    modalidade_avg = modalidade_df[indicator_columns].mean(numeric_only=True) if not modalidade_df.empty else pd.Series()
+    porte_avg = porte_df[indicator_columns].mean(numeric_only=True) if not porte_df.empty else pd.Series()
+
+    records: list[dict[str, str]] = []
+    for indicator in INDICATORS:
+        op_value = operadora_avg.get(indicator.column)
+        mod_value = modalidade_avg.get(indicator.column) if not modalidade_avg.empty else None
+        porte_value_avg = porte_avg.get(indicator.column) if not porte_avg.empty else None
+
+        records.append(
+            {
+                "Indicador": indicator.name,
+                "Operadora": format_metric(op_value, indicator.kind),
+                "Modalidade (média)": format_metric(mod_value, indicator.kind) if modality_value else "—",
+                "Δ Modalidade": format_difference(
+                    op_value - mod_value if mod_value is not None and not pd.isna(mod_value) else None,
+                    indicator.kind,
+                )
+                if modality_value
+                else "—",
+                "Porte (média)": format_metric(porte_value_avg, indicator.kind) if porte_value else "—",
+                "Δ Porte": format_difference(
+                    op_value - porte_value_avg
+                    if porte_value_avg is not None and not pd.isna(porte_value_avg)
+                    else None,
+                    indicator.kind,
+                )
+                if porte_value
+                else "—",
+            }
+        )
+
+    comparison_df = pd.DataFrame(records)
+    st.dataframe(
+        comparison_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.caption(
+        "Diferenças (Δ) mostram quanto a operadora se distancia da média do segmento selecionado, "
+        "considerando os mesmos filtros de período aplicados."
+    )
+
+
 def show_financial_panel(df: pd.DataFrame) -> None:
     st.subheader("Painel financeiro (valores trimestrais)")
     if df.empty:
@@ -853,7 +760,10 @@ def show_financial_panel(df: pd.DataFrame) -> None:
         return
 
     df = append_period_columns(df)
-    value_columns = [col for col in df.columns if col.startswith("vr_")]
+    value_columns = [component.column for component in COMPONENTS if component.column in df.columns]
+    if not value_columns:
+        st.info("Valores contábeis agregados não estão disponíveis na base atual.")
+        return
 
     operadoras = df[["reg_ans", "nome_fantasia"]].drop_duplicates().sort_values("nome_fantasia")
     operadora_options = ["Consolidado"] + operadoras["reg_ans"].tolist()
@@ -920,7 +830,7 @@ def show_financial_panel(df: pd.DataFrame) -> None:
 
 
 def show_correlation_panel(df: pd.DataFrame) -> None:
-    st.subheader("Correlação despesas administrativas x MLL")
+    st.subheader("Correlação despesas administrativas x ROE")
     if df.empty:
         st.info("Sem dados para análise de correlação.")
         return
@@ -931,11 +841,8 @@ def show_correlation_panel(df: pd.DataFrame) -> None:
         st.info("Sem dados para o período selecionado.")
         return
     subset["pct_da"] = subset["pct_despesas_administrativas"]
-    subset["mll"] = subset["margem_lucro_liquida"]
-    if "vr_desp_administrativas" in subset.columns:
-        subset["desp_adm_abs"] = subset["vr_desp_administrativas"]
-    else:
-        subset["desp_adm_abs"] = pd.Series([0] * len(subset), index=subset.index)
+    subset["roe"] = subset["retorno_patrimonio_liquido"]
+    subset["base_tamanho"] = subset.get("qt_beneficiarios_periodo", pd.Series(0, index=subset.index)).fillna(0)
     if "operadora_label" not in subset.columns:
         subset["operadora_label"] = subset["reg_ans"]
 
@@ -944,35 +851,37 @@ def show_correlation_panel(df: pd.DataFrame) -> None:
         .mark_circle()
         .encode(
             x=alt.X("pct_da:Q", title="% Despesas Administrativas", axis=alt.Axis(format="%", tickCount=6)),
-            y=alt.Y("mll:Q", title="Margem de Lucro Líquida", axis=alt.Axis(format="%", tickCount=6)),
-            size=alt.Size("desp_adm_abs:Q", title="Despesa Administrativa (R$)", scale=alt.Scale(type="sqrt")),
+            y=alt.Y("roe:Q", title="Retorno sobre PL (ROE)", axis=alt.Axis(format="%", tickCount=6)),
+            size=alt.Size(
+                "base_tamanho:Q",
+                title="Beneficiários (tamanho relativo)",
+                scale=alt.Scale(type="sqrt"),
+            ),
             color=alt.Color("operadora_label:N", title="Operadora"),
             tooltip=[
                 alt.Tooltip("operadora_label:N", title="Operadora"),
                 alt.Tooltip("pct_da:Q", title="% DA", format=".2%"),
-                alt.Tooltip("mll:Q", title="MLL", format=".2%"),
-                alt.Tooltip("desp_adm_abs:Q", title="Despesa Adm (R$)", format=",.0f"),
+                alt.Tooltip("roe:Q", title="ROE", format=".2%"),
+                alt.Tooltip("base_tamanho:Q", title="Beneficiários", format=",.0f"),
             ],
         )
     )
     st.altair_chart(chart, use_container_width=True)
     resumo = subset[
-        ["operadora_label", "pct_da", "mll", "desp_adm_abs", "vr_contraprestacoes"]
+        ["operadora_label", "pct_da", "roe", "base_tamanho"]
     ].copy()
     resumo.rename(
         columns={
             "operadora_label": "Operadora",
             "pct_da": "% Desp. Adm",
-            "mll": "MLL",
-            "desp_adm_abs": "Desp. Adm (R$)",
-            "vr_contraprestacoes": "Contraprestações (R$)",
+            "roe": "ROE",
+            "base_tamanho": "Beneficiários",
         },
         inplace=True,
     )
     resumo["% Desp. Adm"] = resumo["% Desp. Adm"].apply(lambda x: format_metric(x, "pct"))
-    resumo["MLL"] = resumo["MLL"].apply(lambda x: format_metric(x, "pct"))
-    resumo["Desp. Adm (R$)"] = resumo["Desp. Adm (R$)"].apply(format_currency)
-    resumo["Contraprestações (R$)"] = resumo["Contraprestações (R$)"].apply(format_currency)
+    resumo["ROE"] = resumo["ROE"].apply(lambda x: format_metric(x, "pct"))
+    resumo["Beneficiários"] = resumo["Beneficiários"].apply(lambda x: f"{x:,.0f}".replace(",", "."))
     st.dataframe(resumo, use_container_width=True, hide_index=True)
 
 
@@ -984,12 +893,16 @@ def main() -> None:
     )
     st.title("Painel RN 518 – Indicadores Odontológicos")
     st.caption(
-        "Dados do `rn518_gold` (`vw_rn518_12_indicadores`, `vw_rn518_componentes_odonto`, "
-        "`vw_rn518_demonstracoes_trimestre`) no projeto BigQuery `bigdata-467917`."
+        "Dados carregados do arquivo local `dados/csv_completao_2trimestre25.parquet` (RN 518 completo + indicadores oficiais)."
     )
 
     options = load_filter_options()
     selected_filters = render_filters(options)
+
+    if not selected_filters["anos"] or not selected_filters["trimestres"]:
+        st.info("Selecione pelo menos um ano e um trimestre na barra lateral para visualizar o painel.")
+        return
+
     data = load_indicators(selected_filters)
 
     if data.empty:
@@ -997,6 +910,10 @@ def main() -> None:
         return
 
     data = append_period_columns(data)
+    segment_filters = dict(selected_filters)
+    segment_filters["operadoras"] = []
+    segment_df = load_indicators(segment_filters)
+    segment_df = append_period_columns(segment_df)
     series_data = load_indicators(selected_filters, ignore_period_filters=True)
     series_data = prepare_series_data(series_data)
     financial_df = load_financial_overview(selected_filters)
@@ -1009,6 +926,7 @@ def main() -> None:
         show_indicator_status(data)
         show_metrics(data)
         show_component_summary(data)
+        show_segment_comparison(data, segment_df, selected_filters)
         show_detail_table(data)
 
     with tab_financeiro:
