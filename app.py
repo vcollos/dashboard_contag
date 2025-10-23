@@ -467,7 +467,7 @@ def show_indicator_status(df: pd.DataFrame) -> None:
         )
     status_df = pd.DataFrame(records)
     st.subheader("Classificação dos indicadores")
-    st.dataframe(status_df, hide_index=True, use_container_width=True)
+    st.dataframe(status_df, hide_index=True, use_container_width=True, height=len(status_df) * 48 + 38)
 
 
 def show_timeseries(df: pd.DataFrame) -> None:
