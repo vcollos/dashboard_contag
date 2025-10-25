@@ -1,7 +1,7 @@
 """
 Streamlit dashboard for ANS RN 518 odontological indicators.
 
-The app reads the consolidated dataset `dados/csv_completao_2trimestre25.parquet`
+The app reads the consolidated dataset `dados/indicadores_final_ans_marinho.csv`
 and allows filtering by operadora, modalidade, porte, ano e trimestre.
 """
 
@@ -16,7 +16,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-INDICATORS_DATA_PATH = Path(__file__).resolve().parent / "dados" / "csv_completao_2trimestre25.parquet"
+INDICATORS_DATA_PATH = Path(__file__).resolve().parent / "dados" / "indicadores_final_ans_marinho.csv"
 
 
 @dataclass(frozen=True)
@@ -35,12 +35,12 @@ class Component:
 
 INDICATORS: tuple[Indicator, ...] = (
     Indicator("Sinistralidade", "sinistralidade", "pct"),
-    Indicator("Despesas Administrativas", "pct_despesas_administrativas", "pct"),
-    Indicator("Despesas Comerciais", "pct_despesas_comerciais", "pct"),
-    Indicator("Despesas com Tributos", "pct_despesas_tributarias", "pct"),
-    Indicator("Despesas Operacionais", "pct_despesas_operacionais", "pct"),
-    Indicator("Índice Resultado Financeiro", "indice_resultado_financeiro", "pct"),
-    Indicator("Margem Financeira Líquida", "margem_financeira_liquida", "pct"),
+    Indicator("Despesa Administrativa", "despesas_adm", "pct"),
+    Indicator("Despesa Comercial", "despesas_comerciais", "pct"),
+    Indicator("Despesa Tributária", "despesas_tributarias", "pct"),
+    Indicator("Despesas Operacionais", "despesas_operacionais", "pct"),
+    Indicator("Resultado Financeiro", "resultado_financeiro", "pct"),
+    Indicator("Margem Lucro Líquida", "margem_lucro_liquido", "pct"),
     Indicator("Liquidez Corrente", "liquidez_corrente", "ratio"),
     Indicator("Liquidez Seca", "liquidez_seca", "ratio"),
     Indicator("Endividamento", "endividamento", "ratio"),
@@ -48,6 +48,8 @@ INDICATORS: tuple[Indicator, ...] = (
     Indicator("Retorno sobre PL", "retorno_patrimonio_liquido", "pct"),
     Indicator("Cobertura Provisões Técnicas", "cobertura_provisoes", "ratio"),
     Indicator("Margem de Solvência", "margem_solvencia", "ratio"),
+    Indicator("Prazo Médio (Contraprestação)", "pmcr", "days"),
+    Indicator("Prazo Médio (Eventos)", "pmpe", "days"),
 )
 
 COMPONENTS: tuple[Component, ...] = tuple()
@@ -66,12 +68,20 @@ def load_dataset() -> pd.DataFrame:
     if not INDICATORS_DATA_PATH.exists():
         raise FileNotFoundError(
             f"Arquivo de indicadores não encontrado em {INDICATORS_DATA_PATH}. "
-            "Confirme que o arquivo Parquet definitivo está disponível."
+            "Confirme que o CSV definitivo está disponível."
         )
-    df = pd.read_parquet(INDICATORS_DATA_PATH)
+    df = pd.read_csv(
+        INDICATORS_DATA_PATH,
+        dtype={"reg_ans": str},
+        na_values=["", "NA", "N/A", "-"],
+        keep_default_na=True,
+    )
     df = df.copy()
     df.columns = [col.strip() for col in df.columns]
     df["reg_ans"] = df["reg_ans"].astype(str).str.strip()
+    df["ano"] = pd.to_numeric(df["ano"], errors="coerce").astype("Int64")
+    df["trimestre"] = pd.to_numeric(df["trimestre"], errors="coerce").astype("Int64")
+    df = df.dropna(subset=["reg_ans", "ano", "trimestre"])
     df["ano"] = df["ano"].astype(int)
     df["trimestre"] = df["trimestre"].astype(int)
     if "nome_operadora" not in df.columns:
@@ -89,7 +99,7 @@ def load_dataset() -> pd.DataFrame:
     else:
         df["porte"] = df["porte"].fillna("").astype(str).str.strip()
     if "qt_beneficiarios_periodo" in df.columns:
-        df["total_beneficiarios"] = df["qt_beneficiarios_periodo"].fillna(0)
+        df["total_beneficiarios"] = pd.to_numeric(df["qt_beneficiarios_periodo"], errors="coerce").fillna(0)
     else:
         df["total_beneficiarios"] = 0
     if "uniodonto" in df.columns:
@@ -100,6 +110,7 @@ def load_dataset() -> pd.DataFrame:
     for indicator in INDICATORS:
         if indicator.column not in df.columns:
             df[indicator.column] = float("nan")
+        df[indicator.column] = pd.to_numeric(df[indicator.column], errors="coerce")
     return df
 
 
@@ -224,31 +235,31 @@ def classify_indicator_value(column: str, value: float | None) -> str:
         if value <= 0.85:
             return "Adequado"
         return "Crítico"
-    if column == "pct_despesas_administrativas":
+    if column == "despesas_adm":
         if value <= 0.10:
             return "Enxuto"
         if value <= 0.15:
             return "Controle"
         return "Pressão"
-    if column == "pct_despesas_comerciais":
+    if column == "despesas_comerciais":
         if value <= 0.07:
             return "Competitivo"
         if value <= 0.12:
             return "Atenção"
         return "Elevado"
-    if column == "pct_despesas_tributarias":
+    if column == "despesas_tributarias":
         if value <= 0.03:
             return "Controlado"
         if value <= 0.05:
             return "Atenção"
         return "Pressão"
-    if column == "pct_despesas_operacionais":
+    if column == "despesas_operacionais":
         if value <= 0.90:
             return "Controlado"
         if value <= 1.00:
             return "Limite"
         return "Desfavorável"
-    if column == "indice_resultado_financeiro":
+    if column == "resultado_financeiro":
         if value >= 0.02:
             return "Positivo"
         if value >= 0:
@@ -290,7 +301,7 @@ def classify_indicator_value(column: str, value: float | None) -> str:
         if value >= 0:
             return "Atenção"
         return "Negativo"
-    if column in {"margem_financeira_liquida"}:
+    if column == "margem_lucro_liquido":
         if value >= 0.05:
             return "Saudável"
         if value >= 0:
@@ -308,6 +319,12 @@ def classify_indicator_value(column: str, value: float | None) -> str:
         if value >= 0.8:
             return "Atenção"
         return "Insuficiente"
+    if column in {"pmcr", "pmpe"}:
+        if value <= 60:
+            return "Curto"
+        if value <= 90:
+            return "Médio"
+        return "Longo"
     return ""
 
 
@@ -840,7 +857,10 @@ def show_correlation_panel(df: pd.DataFrame) -> None:
     if subset.empty:
         st.info("Sem dados para o período selecionado.")
         return
-    subset["pct_da"] = subset["pct_despesas_administrativas"]
+    if "despesas_adm" not in subset.columns:
+        st.info("Indicador de despesas administrativas indisponível para este conjunto de dados.")
+        return
+    subset["pct_da"] = subset["despesas_adm"]
     subset["roe"] = subset["retorno_patrimonio_liquido"]
     subset["base_tamanho"] = subset.get("qt_beneficiarios_periodo", pd.Series(0, index=subset.index)).fillna(0)
     if "operadora_label" not in subset.columns:
@@ -893,7 +913,7 @@ def main() -> None:
     )
     st.title("Painel RN 518 – Indicadores Odontológicos")
     st.caption(
-        "Dados carregados do arquivo local `dados/csv_completao_2trimestre25.parquet` (RN 518 completo + indicadores oficiais)."
+        "Dados carregados do arquivo local `dados/indicadores_final_ans_marinho.csv` (RN 518 completo + indicadores oficiais)."
     )
 
     options = load_filter_options()
